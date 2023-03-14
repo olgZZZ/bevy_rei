@@ -5,7 +5,6 @@ use bevy::prelude::*;
 use bevy::{
   ecs::event::{Events, ManualEventReader},
   render::camera::Camera,
-  window::WindowId,
 };
 #[cfg(feature = "debug")]
 use bevy_prototype_lyon::plugin::ShapePlugin;
@@ -18,10 +17,16 @@ pub struct InteractionPlugin;
 
 impl Plugin for InteractionPlugin {
   fn build(&self, app: &mut App) {
+    let interaction_state = InteractionState {
+      ordered_interact_list_map: HashMap::new(),
+      cursor_positions: HashMap::new(),
+      last_window_id: None,
+      last_cursor_position: Vec2 { x: 0.0, y: 0.0 },
+    };
     app
-      .init_resource::<InteractionState>()
-      .add_system_to_stage(CoreStage::PostUpdate, interaction_state_system)
-      .add_system_to_stage(CoreStage::PostUpdate, interaction_system);
+      .insert_resource(interaction_state)
+      .add_system(interaction_state_system.in_base_set(CoreSet::PostUpdate))
+      .add_system(interaction_system.in_base_set(CoreSet::PostUpdate));
   }
 }
 
@@ -52,12 +57,12 @@ impl Plugin for InteractionDebugPlugin {
 #[derive(Debug, Hash, Eq, PartialEq, Clone, Copy, Default)]
 pub struct Group(pub u8);
 
-#[derive(Default, Resource)]
+#[derive(Resource)]
 pub struct InteractionState {
   pub ordered_interact_list_map: HashMap<Group, Vec<(Entity, Vec2)>>,
-  pub cursor_positions:          HashMap<Group, Vec2>,
-  pub last_window_id:            WindowId,
-  pub last_cursor_position:      Vec2,
+  pub cursor_positions: HashMap<Group, Vec2>,
+  pub last_window_id: Option<Entity>,
+  pub last_cursor_position: Vec2,
 }
 
 impl InteractionState {
@@ -90,41 +95,43 @@ impl Default for InteractionSource {
 fn interaction_state_system(
   mut interaction_state: ResMut<InteractionState>,
   cursor_moved: Res<Events<CursorMoved>>,
-  windows: Res<Windows>,
+  windows: Query<(Entity, &mut Window)>,
   mut sources: Query<(&mut InteractionSource, &GlobalTransform, Option<&Camera>)>,
 ) {
   interaction_state.cursor_positions.clear();
 
   for (mut interact_source, global_transform, camera) in sources.iter_mut() {
     if let Some(evt) = interact_source.cursor_events.iter(&cursor_moved).last() {
-      interaction_state.last_window_id = evt.id;
+      interaction_state.last_window_id = Some(evt.window);
       interaction_state.last_cursor_position = evt.position;
     }
     let projection_matrix = match camera {
       Some(camera) => camera.projection_matrix(),
       None => panic!("Interacting without camera not supported."),
     };
-    if let Some(window) = windows.get(interaction_state.last_window_id) {
-      let screen_size = Vec2::from([window.width() as f32, window.height() as f32]);
-      let cursor_position = interaction_state.last_cursor_position;
-      let cursor_position_ndc = (cursor_position / screen_size) * 2.0 - Vec2::from([1.0, 1.0]);
-      let camera_matrix = global_transform.compute_matrix();
-      let ndc_to_world: Mat4 = camera_matrix * projection_matrix.inverse();
-      let cursor_position = ndc_to_world
-        .transform_point3(cursor_position_ndc.extend(1.0))
-        .truncate();
+    if interaction_state.last_window_id.is_some() {
+      if let Ok((_i, window)) = windows.get(interaction_state.last_window_id.unwrap()) {
+        let screen_size = Vec2::from([window.width() as f32, window.height() as f32]);
+        let cursor_position = interaction_state.last_cursor_position;
+        let cursor_position_ndc = (cursor_position / screen_size) * 2.0 - Vec2::from([1.0, 1.0]);
+        let camera_matrix = global_transform.compute_matrix();
+        let ndc_to_world: Mat4 = camera_matrix * projection_matrix.inverse();
+        let cursor_position = ndc_to_world
+          .transform_point3(cursor_position_ndc.extend(1.0))
+          .truncate();
 
-      for group in &interact_source.groups {
-        if interaction_state
+        for group in &interact_source.groups {
+          if interaction_state
           .cursor_positions
           .insert(*group, cursor_position)
           .is_some()
-        {
+          {
           panic!(
             "Multiple interaction sources have been added to interaction group {:?}",
             group
-          );
-        }
+            );  
+          }
+        } 
       }
     }
   }
